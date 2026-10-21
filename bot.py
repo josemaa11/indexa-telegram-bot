@@ -10,7 +10,9 @@ En cada ejecución:
   2. Avisa cuando la caída desde el máximo cruza un nuevo umbral
      (por defecto 10, 15, 20, 25 y 30 %). Cuando la cartera se recupera,
      avisa una vez y vuelve a armar los avisos.
-  3. Una vez al mes (desde el día 3) manda un resumen de la cartera.
+  3. Avisa cuando Indexa invierte una aportación (fondos, participaciones,
+     precio y efectivo pendiente), y de ventas o rebalanceos.
+  4. Una vez al mes (desde el día 3) manda un resumen de la cartera.
 
 Configuración (secrets / variables del repositorio en GitHub):
   INDEXA_TOKEN         secret · token de la API de Indexa
@@ -19,6 +21,7 @@ Configuración (secrets / variables del repositorio en GitHub):
   UMBRALES_CAIDA       variable opcional · "10,15,20,25,30"
   RECUPERACION         variable opcional · "5"
   DIA_RESUMEN          variable opcional · "3"
+  AVISO_OPERACIONES    variable opcional · "no" para desactivar el aviso de compras
 
 Uso:
   python bot.py              ejecución diaria
@@ -253,6 +256,164 @@ def metrics(perf: dict, today: date) -> dict | None:
     }
 
 
+# ------------------------------------------------- operaciones con fondos
+
+# Códigos de operación de /instrument-transactions (según clientes open source)
+BUY_CODES = {20, 67, 300, 302, 1371}     # suscripción, por traspaso, plan, switch
+SELL_CODES = {21, 72, 304, 1372}         # reembolso, por traspaso, plan, switch
+TX_HORIZON_DAYS = 90     # operaciones más antiguas no pueden ser "nuevas"
+TX_FIRST_RUN_DAYS = 7    # en la primera ejecución solo se avisa de lo reciente
+
+
+def num(x: float, decimals: int = 2) -> str:
+    s = f"{x:,.{decimals}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return s
+
+
+def tx_date(t: dict) -> date | None:
+    try:
+        return date.fromisoformat(str(t.get("date"))[:10])
+    except ValueError:
+        return None
+
+
+def tx_key(t: dict) -> str:
+    inst = t.get("instrument") or {}
+    return "|".join(str(x) for x in (t.get("date"), t.get("value_date"),
+                                     t.get("operation_code"), inst.get("identifier"),
+                                     t.get("titles"), t.get("amount")))
+
+
+def fetch_transactions(indexa, account: str) -> list[dict] | None:
+    try:
+        raw = indexa.get(f"/accounts/{account}/instrument-transactions")
+    except requests.HTTPError:
+        return None  # no disponible: no tocar el estado
+    if isinstance(raw, dict):
+        raw = raw.get("transactions") or raw.get("data") or []
+    return [t for t in raw if isinstance(t, dict)]
+
+
+def new_transactions(txs: list[dict], st: dict, today: date) -> list[dict]:
+    """Operaciones cerradas que no se habían visto. Actualiza st['tx_seen']."""
+    horizon = date.fromordinal(today.toordinal() - TX_HORIZON_DAYS)
+    recent = {}
+    for t in txs:
+        d = tx_date(t)
+        if d is None or d < horizon or t.get("status", "closed") != "closed":
+            continue
+        recent[tx_key(t)] = t
+
+    if "tx_seen" not in st:  # primera vez: solo lo de los últimos días
+        first = date.fromordinal(today.toordinal() - TX_FIRST_RUN_DAYS)
+        new = [t for t in recent.values() if tx_date(t) >= first]
+    else:
+        seen = set(st["tx_seen"])
+        new = [t for k, t in recent.items() if k not in seen]
+    st["tx_seen"] = sorted(recent)
+    return new
+
+
+def group_by_day(txs: list[dict]) -> list[list[dict]]:
+    groups: dict[str, list[dict]] = {}
+    for t in txs:
+        groups.setdefault(str(t.get("value_date") or t.get("date"))[:10], []).append(t)
+    return [groups[k] for k in sorted(groups)]
+
+
+def latest_group(txs: list[dict]) -> list[dict]:
+    closed = [t for t in txs if t.get("status", "closed") == "closed" and tx_date(t)]
+    if not closed:
+        return []
+    last = max(str(t.get("value_date") or t.get("date"))[:10] for t in closed)
+    return [t for t in closed if str(t.get("value_date") or t.get("date"))[:10] == last]
+
+
+def tx_line(t: dict) -> str:
+    name = (t.get("instrument") or {}).get("name") or "Fondo"
+    amount = abs(float(t.get("amount") or 0))
+    line = f"• {name}: <b>{eur(amount)}</b>"
+    titles, price = t.get("titles"), t.get("price")
+    if titles and price:
+        line += f"\n   {num(abs(float(titles)), 4)} participaciones a {num(float(price), 4)} €"
+    return line
+
+
+def msg_operations(acc: str, group: list[dict], cash: float | None,
+                   preview: bool = False) -> str | None:
+    codes = lambda t: int(t.get("operation_code") or 0)
+    buys = [t for t in group if codes(t) in BUY_CODES]
+    sells = [t for t in group if codes(t) in SELL_CODES]
+    if not buys and not sells:
+        return None
+
+    day = str(group[0].get("value_date") or group[0].get("date"))[:10]
+    try:
+        day = date.fromisoformat(day).strftime("%d/%m/%Y")
+    except ValueError:
+        pass
+    pre = "🔎 <i>Vista previa de tu última operación</i>\n\n" if preview else ""
+    total = lambda ts: sum(abs(float(t.get("amount") or 0)) for t in ts)
+
+    if buys and sells:
+        lines = [f"{pre}🔄 <b>Indexa ha rebalanceado tu cartera</b> ({short(acc)})", "",
+                 "Vendido:"] + [tx_line(t) for t in sells] + ["", "Comprado:"] + \
+                [tx_line(t) for t in buys] + ["", f"Precio del {day}. Es automático: "
+                                              "no tienes que hacer nada."]
+        return "\n".join(lines)
+
+    if sells:
+        lines = [f"{pre}💸 <b>Venta de participaciones</b> ({short(acc)})", ""] + \
+                [tx_line(t) for t in sells] + \
+                ["", f"Total: <b>{eur(total(sells))}</b> · precio del {day}"]
+        return "\n".join(lines)
+
+    lines = [f"{pre}✅ <b>Aportación invertida</b> ({short(acc)})", ""] + \
+            [tx_line(t) for t in buys] + \
+            ["", f"Total invertido: <b>{eur(total(buys))}</b>", f"Precio del {day}"]
+    if cash is not None and cash >= 1:
+        lines.append(f"\nEfectivo pendiente de invertir: {eur(cash)}. Indexa lo "
+                     "invertirá cuando pueda comprar al menos 100 € en cada fondo.")
+    return "\n".join(lines)
+
+
+def pending_cash(indexa, account: str) -> float | None:
+    try:
+        p = indexa.get(f"/accounts/{account}/portfolio")
+    except requests.HTTPError:
+        return None
+    cash = (p.get("portfolio") or {}).get("cash_amount")
+    if cash is None:
+        cash = ((p.get("cash_accounts") or [{}])[0] or {}).get("amount")
+    try:
+        return float(cash) if cash is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def operation_messages(indexa, acc: str, st: dict, today: date,
+                       preview: bool = False) -> list[str]:
+    txs = fetch_transactions(indexa, acc)
+    if txs is None:
+        return []
+    fresh = new_transactions(txs, st, today)
+    groups = group_by_day(fresh)
+    if preview and not groups:
+        last = latest_group(txs)
+        groups = [last] if last else []
+    msgs, cash = [], None
+    for i, g in enumerate(groups):
+        is_last = i == len(groups) - 1
+        has_buy = any(int(t.get("operation_code") or 0) in BUY_CODES for t in g)
+        if is_last and has_buy and cash is None:
+            cash = pending_cash(indexa, acc)
+        m = msg_operations(acc, g, cash if is_last else None,
+                           preview=preview and not fresh)
+        if m:
+            msgs.append(m)
+    return msgs
+
+
 # ---------------------------------------------------------------- mensajes
 
 
@@ -358,6 +519,8 @@ def run(a) -> None:
         for acc in accounts:
             print(f"\n/accounts/{short(acc)}/performance:")
             debug_shape(indexa.performance(acc))
+            print(f"\n/accounts/{short(acc)}/instrument-transactions:")
+            debug_shape(fetch_transactions(indexa, acc) or [])
         return
 
     state = load_state()
@@ -392,8 +555,15 @@ def run(a) -> None:
             save_state(state)
         return
 
+    ops_on = env("AVISO_OPERACIONES", "si").lower() not in ("no", "false", "0")
     sent = 0
     for acc in accounts:
+        st = acc_state.setdefault(acc, {"alert_tier": 0})
+        if ops_on:
+            for msg in operation_messages(indexa, acc, st, now, preview=a.test):
+                tg.send(msg)
+                sent += 1
+
         m = metrics(indexa.performance(acc), now)
         if m is None:
             text = (f"{short(acc)}: todavía no hay datos de rentabilidad. "
@@ -403,7 +573,6 @@ def run(a) -> None:
             summary("ℹ️ " + text)
             continue
 
-        st = acc_state.setdefault(acc, {"alert_tier": 0})
         hit = max([t for t in tiers if m["drawdown"] <= -t / 100], default=0)
 
         if hit > st["alert_tier"]:

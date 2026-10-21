@@ -4,6 +4,8 @@ Un bot gratuito que vigila tu cartera de **Indexa Capital** y te escribe por **T
 
 - ⚠️ **Si tu cartera cae con fuerza** (más de un 10 %, 15 %, 20 %…) desde su máximo, te avisa.
   Un solo aviso por cada nivel, sin repetirse cada día.
+- ✅ **Cuando Indexa invierte tu aportación**, te dice en qué fondos, cuántas participaciones
+  y a qué precio, y si queda dinero pendiente de invertir.
 - 📊 **Una vez al mes** te manda un resumen: cuánto vale, cuánto has aportado, cuánto has ganado
   y la rentabilidad del mes.
 
@@ -57,7 +59,7 @@ Ya tienes tu propia copia. A partir de ahora trabaja siempre en **tu** copia, no
 1. En Telegram, busca **`@BotFather`**. Es el que tiene la ✔️ azul de verificado.
 2. Pulsa **Iniciar** y escribe `/newbot`.
 3. Te pedirá un **nombre**: escribe el que quieras, por ejemplo `Mi Indexa`.
-4. Te pedirá un **usuario**: tiene que acabar en `bot`, por ejemplo `mi_indexa_bot`.
+4. Te pedirá un **usuario**: tiene que acabar en `bot`, por ejemplo `mi_indexa_jose_bot`.
    Si está cogido, prueba con otro.
 5. BotFather te responderá con un mensaje que contiene una línea larga como esta:
 
@@ -161,6 +163,7 @@ Si no tocas nada, se usan estos valores:
 | `UMBRALES_CAIDA` | `10,15,20,25,30` | Caídas (en %) a partir de las que te avisa. |
 | `RECUPERACION` | `5` | Cuando la caída vuelve a ser menor que esto, te avisa de que se ha recuperado. |
 | `DIA_RESUMEN` | `3` | Día del mes a partir del cual te manda el resumen. |
+| `AVISO_OPERACIONES` | `si` | Pon `no` si no quieres el aviso cada vez que Indexa compra o vende fondos. |
 
 Para cambiarlas: **Settings → Secrets and variables → Actions →** pestaña **`Variables`** →
 **`New repository variable`**, con el nombre de la tabla y el valor que quieras.
@@ -184,6 +187,15 @@ Solo tú, siempre que tu repositorio sea **privado** (paso 2). El autor de esta 
 **¿Por qué aparecen cambios automáticos llamados "bot: actualizar memoria"?**
 El bot guarda en un archivo (`state.json`) qué avisos te ha enviado ya, para no repetirlos.
 
+**¿Cuándo me llega el aviso de "Aportación invertida"?**
+Indexa tarda unos 2–3 días hábiles desde tu transferencia hasta comprar los fondos, y el bot
+te avisa en su siguiente ejecución, normalmente esa misma tarde o la siguiente. Si aportas poco,
+parte del dinero puede quedarse en efectivo hasta la siguiente aportación: Indexa solo compra
+cuando puede invertir al menos 100 € en cada fondo, y el aviso te lo indica.
+
+**¿Me avisará de compras antiguas al instalarlo?**
+No. La primera vez solo te avisa de lo de los últimos 7 días; a partir de ahí, solo de lo nuevo.
+
 **¿Funciona con el plan de pensiones de Indexa?**
 Sí. Vigila todas tus cuentas activas, cada una con sus propios avisos.
 
@@ -205,7 +217,8 @@ La información que envía es solo informativa y **no es asesoramiento financier
 <details>
 <summary>Para curiosos: cómo funciona por dentro</summary>
 
-- `bot.py` consulta la API de Indexa (`/users/me` y `/accounts/{cuenta}/performance`) y usa
+- `bot.py` consulta la API de Indexa (`/users/me`, `/accounts/{cuenta}/performance`,
+  `/instrument-transactions` y `/portfolio`) y usa
   la serie `return.index` (rentabilidad *time-weighted*) para calcular la caída desde máximos.
 - `.github/workflows/indexa-bot.yml` lo ejecuta de lunes a viernes a las 16:17 UTC y guarda
   `state.json` en el repositorio.
