@@ -44,6 +44,7 @@ jobs:
           UMBRALES_CAIDA: ${{ vars.UMBRALES_CAIDA }}
           RECUPERACION: ${{ vars.RECUPERACION }}
           DIA_RESUMEN: ${{ vars.DIA_RESUMEN }}
+          AVISO_OPERACIONES: ${{ vars.AVISO_OPERACIONES }}
           MODO: ${{ inputs.modo }}
         run: |
           case "$MODO" in
